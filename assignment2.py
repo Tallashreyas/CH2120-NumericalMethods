@@ -1,1221 +1,847 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Polished PyQt5 application with 3 tabs.
-
-Tab 1: Factorial Harshad checks
-Tab 2: Consecutive Harshad runs
-Tab 3: Shifted Legendre polynomial tools with robust coefficient computation using exact rational arithmetic for high n.
-
-Tab 3 outputs exactly:
-    1) coefficients of nth shifted Legendre polynomial (domain [0,1])
-    2) companion matrix of the polynomial (when feasible)
-    3) LU decomposition of companion matrix and eigenvalues
-    4) roots of the polynomial
-    5) solution of Ax=b where b = {1,2,...,100}
-    6) smallest and largest roots refined by Newton-Raphson
-
-This version uses an exact recurrence with Fraction arithmetic for computing shifted Legendre coefficients for large n to avoid overflow and NaNs.
+CH2120 Assignment GUI
+Home Page → Question 1 (Gauss–Legendre) → Question 2 (BVP Solver)
 """
-from PyQt5 import QtGui
-import gmpy2
-from PyQt5 import QtWidgets, QtCore
-import sys
 import math
 import numpy as np
-from scipy import special, linalg
-from fractions import Fraction
+from scipy.special import erf
+from PyQt5.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, QSpinBox,
+    QLabel, QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
+    QTabWidget, QFileDialog, QMessageBox
+)
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
+plt.style.use("dark_background")
 
-COMPANION_LIMIT = 500  # maximum order for which a companion matrix will be built
+# Canvas class (same as before)
+class MplCanvas(FigureCanvas):
+    def __init__(self, width=6, height=4, dpi=100):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.ax = fig.add_subplot(111)
+        super().__init__(fig)
 
-# -------------------- Utilities --------------------
-sys.set_int_max_str_digits(1000000000)
-def is_harshad(n: int) -> bool:
-    s = 0
-    m = n
-    while m:
-        s += m % 10
-        m //= 10
-    return s != 0 and n % s == 0
+import sys
+import numpy as np
+from numpy.linalg import eigh
 
+import math
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QLineEdit, QSpinBox, QFileDialog, QMessageBox, QTableWidget,
+    QTableWidgetItem, QSizePolicy, QStackedWidget, QGroupBox, QFormLayout
+)
+from PyQt5.QtCore import Qt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
-def factorial_harshad_checks(k:int,start_n: int, end_n: int):
-    if start_n < 1:
-        start_n = 1
-    f = gmpy2.fac(start_n - 1)
-    results = []
-    first_two_non = []
-    for n in range(start_n, end_n + 1):
-        f *= n
-        h = is_harshad(f)
-        results.append((n, h, f))
-        if not h and len(first_two_non) < k:
-            first_two_non.append((n, f))
-        if(len(first_two_non)==k):
-            break
-    return results, first_two_non
+class MplCanvas(FigureCanvas):
+    def __init__(self, width=6, height=4, dpi=100):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.ax = fig.add_subplot(111)
+        super().__init__(fig)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
 
-def longest_consecutive_harshad(a: int, b: int, max_iter=10**7):
-    if a > b:
-        a, b = b, a
-    rng = b - a + 1
-    if rng <= 0:
-        return 0, None
-    if rng > max_iter:
-        return None, f"Range too large ({rng}) to scan; increase max_iter or reduce range." 
-    longest = 0
-    best_start = None
-    cur = 0
-    cur_start = a
-    for n in range(a, b + 1):
-        if is_harshad(n):
-            if cur == 0:
-                cur_start = n
-            cur += 1
-            if cur > longest:
-                longest = cur
-                best_start = cur_start
-        else:
-            cur = 0
-    return longest, best_start
-
-# -------------------- Shifted Legendre utilities (robust for large n) --------------------
-# We compute Q_n(x) = P_n(2x-1) using exact rational arithmetic (Fraction) via recurrence:
-# (n+1) Q_{n+1}(x) = (2n+1) (2x-1) Q_n(x) - n Q_{n-1}(x)
-
-def poly_trim(coeffs):
-    # remove leading zeros (coeffs highest-first)
-    i = 0
-    while i < len(coeffs) and coeffs[i] == 0:
-        i += 1
-    return coeffs[i:] if i < len(coeffs) else [Fraction(0)]
-
-def poly_add(a, b):
-    # add two polynomials given as lists of Fraction (highest-first)
-    la = len(a); lb = len(b)
-    if la < lb:
-        a = [Fraction(0)]*(lb-la) + a
-    elif lb < la:
-        b = [Fraction(0)]*(la-lb) + b
-    return [ai + bi for ai, bi in zip(a, b)]
-
-def poly_sub(a, b):
-    la = len(a); lb = len(b)
-    if la < lb:
-        a = [Fraction(0)]*(lb-la) + a
-    elif lb < la:
-        b = [Fraction(0)]*(la-lb) + b
-    return [ai - bi for ai, bi in zip(a, b)]
-
-def poly_mul_scalar(a, scalar):
-    return [ai * scalar for ai in a]
-
-def poly_mul_linear_2x_minus1(a):
-    # multiply polynomial a(x) by (2x - 1)
-    # a highest-first: degree d -> len = d+1
-    # result degree d+1
-    d = len(a) - 1
-    res = [Fraction(0)] * (len(a) + 1)
-    for i, coeff in enumerate(a):
-        # coeff corresponds to x^{d - i}
-        # multiply by 2x -> contributes to x^{d+1 - i}
-        res[i] += coeff * Fraction(-1)  # times -1 (constant term)
-        res[i] += coeff * Fraction(0)  # placeholder
-    # easier: perform convolution with [2, -1] where both highest-first
-    # represent [2, -1] as highest-first too
-    kernel = [Fraction(2), Fraction(-1)]
-    # convolution highest-first: convolve coeff arrays reversed then reverse back
-    a_rev = a[::-1]
-    k_rev = kernel[::-1]
-    conv = [Fraction(0)] * (len(a_rev) + len(k_rev) - 1)
-    for i in range(len(a_rev)):
-        for j in range(len(k_rev)):
-            conv[i+j] += a_rev[i] * k_rev[j]
-    res = conv[::-1]
-    return poly_trim(res)
-
-def poly_div_scalar(a, scalar):
-    return [ai / scalar for ai in a]
-
-def shifted_legendre_poly_coeffs(n: int):
-    """Return coefficients (highest-first) of Q_n(x)=P_n(2x-1) using exact Fraction arithmetic.
-    Results are normalized to make leading coefficient 1 and returned as numpy array of floats.
+# --- Math utilities used in this page ---
+def golub_welsch_jacobi(n):
     """
-    if n == 0:
-        return np.array([1.0])
-    if n == 1:
-        # Q1(x) = 2x - 1
-        return np.array([1.0, -0.5]) if False else np.array([2.0, -1.0]) / 2.0  # but we'll normalize below
-
-    # Use recurrence with Fraction coefficients
-    Q0 = [Fraction(1)]  # degree 0
-    Q1 = [Fraction(2), Fraction(-1)]  # corresponds to 2x - 1 (highest-first)
-
-    if n == 0:
-        coeffs_frac = Q0
-    elif n == 1:
-        coeffs_frac = Q1
-    else:
-        Q_prev = Q0
-        Q_curr = Q1
-        for k in range(1, n):
-            # compute RHS = (2k+1)*(2x-1)*Q_curr - k*Q_prev
-            term1 = poly_mul_linear_2x_minus1(Q_curr)
-            term1 = poly_mul_scalar(term1, Fraction(2*k+1))
-            term2 = poly_mul_scalar(Q_prev, Fraction(k))
-            rhs = poly_sub(term1, term2)
-            # divide by (k+1)
-            Q_next = poly_div_scalar(rhs, Fraction(k+1))
-            Q_next = poly_trim(Q_next)
-            Q_prev, Q_curr = Q_curr, Q_next
-        coeffs_frac = Q_curr
-
-    # normalize to make leading coefficient 1 (convert to float after normalization)
-    lead = coeffs_frac[0]
-    if lead == 0:
-        # shouldn't happen
-        coeffs_frac = [Fraction(0)]
-    else:
-        coeffs_frac = [c / lead for c in coeffs_frac]
-
-    # convert to float array carefully (may be large but normalized)
-    coeffs_float = np.array([float(c) for c in coeffs_frac], dtype=np.float64)
-    return coeffs_float
-
-def companion_matrix_from_coeffs(coeffs):
+    Build Jacobi tridiagonal matrix for Legendre polynomials (Gauss-Legendre)
+    and return eigenvalues & eigenvectors (nodes and eigenvectors).
     """
-    Build the canonical companion matrix for a polynomial
-    p(x) = a_n x^n + a_{n-1} x^{n-1} + ... + a_1 x + a_0.
+    if n < 1:
+        raise ValueError("n >= 1 required")
+    k = np.arange(1, n, dtype=float)
+    beta = k / np.sqrt(4.0 * k * k - 1.0)
+    J = np.diag(beta, 1) + np.diag(beta, -1)
+    evals, evecs = eigh(J)   # evals sorted ascending; evecs columns correspond to eigenvalues
+    return evals, evecs, J
 
-    The eigenvalues of the returned matrix are the roots of p(x).
-
-    Parameters
-    ----------
-    coeffs : array_like
-        Polynomial coefficients in highest-first order [a_n, a_{n-1}, ..., a_0].
-
-    Returns
-    -------
-    C : ndarray
-        Companion matrix of shape (n, n).
+def weights_from_evecs(evecs):
     """
-    coeffs = np.array(coeffs, dtype=float)
-    n = len(coeffs) - 1
-    if n <= 0:
-        return np.array([[]])
-    
-    # Normalize to monic form
-    if coeffs[0] != 1.0:
-        coeffs = coeffs / coeffs[0]
-    
-    # Create companion matrix
-    C = np.zeros((n, n), dtype=float)
-    for i in range(1, n):
-        C[i, i-1] = 1.0   # subdiagonal 1s
+    Compute Gauss-Legendre weights from eigenvectors.
+    For normalized eigenvectors v(:,i) the weight is w_i = 2 * (v[0,i])**2
+    (first component squared times 2).
+    Also compute L2 norms of each eigenvector (should be 1 for eigh).
+    """
+    # ensure columns correspond to eigenvectors
+    # evecs shape (n, n) columns are eigenvectors.
+    n = evecs.shape[0]
+    norms = np.linalg.norm(evecs, axis=0)         # L2 norms of columns
+    # normalize columns (eigh returns orthonormal columns typically; still we normalize to be safe)
+    evecs_normed = evecs / norms[np.newaxis, :]
+    first_comp = evecs_normed[0, :]
+    w = 2.0 * (first_comp ** 2)
+    return w, norms, first_comp
 
-    # Last column: reversed negatives of remaining coefficients
-    C[:, -1] = -coeffs[:0:-1]  # skip the leading coeff, reverse order
+def weights_via_lagrange_moments(nodes):
+    """
+    Solve V^T w = m where m_k = integral_{-1}^{1} x^k dx (moments).
+    V[i,j] = nodes[i]**j (columns: powers)
+    """
+    x = np.asarray(nodes, dtype=float)
+    n = len(x)
+    V = np.vander(x, N=n, increasing=True)   # columns = x^0, x^1, ...
+    m = np.zeros(n, dtype=float)
+    for k in range(n):
+        m[k] = 0.0 if (k % 2 == 1) else 2.0/(k+1)
+    # solve V^T w = m
+    w = np.linalg.solve(V.T, m)
+    return w
+# ---------------- Matplotlib Canvas ----------------
+class MplCanvas(FigureCanvas):
+    def __init__(self, width=6, height=4, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
 
-    return C
+def build_A_B_planar(n):
+    x_full = collocation_nodes_planar(n)  # length m = n+2
+    A_full = differentiation_matrix_1st(x_full)  # already on [0,1]
+    B_full = differentiation_matrix_2nd(x_full)  # already on [0,1]
+    return x_full, A_full, B_full
+
+# ---------------- Math Utilities ----------------
+def golub_welsch_legendre(n):
+    k = np.arange(1, n, dtype=float)
+    beta = k / np.sqrt(4*k*k - 1)
+    J = np.diag(beta, 1) + np.diag(beta, -1)
+    evals, evecs = np.linalg.eigh(J)
+    x = evals
+    w = 2 * (evecs[0, :] ** 2)
+    return x, w
+def collocation_nodes_planar(n):
+    # n interior Gauss–Legendre nodes on [0,1], then add endpoints
+    x_int, _ = golub_welsch_legendre(n)      # [-1,1]
+    x_int = 0.5*(x_int + 1.0)                # -> [0,1]
+    x_full = np.concatenate(([0.0], x_int, [1.0]))
+    return x_full
+
+def weights_via_lagrange_moments(x):
+    n = len(x)
+    V = np.vander(x, N=n, increasing=True)
+    m = np.zeros(n)
+    for k in range(n):
+        m[k] = 0 if k % 2 else 2.0/(k+1)
+    w = np.linalg.solve(V.T, m)
+    return w
+
+def barycentric_weights(x):
+    n = len(x)
+    w = np.ones(n)
+    for i in range(n):
+        diff = x[i] - np.delete(x, i)
+        w[i] = 1.0 / np.prod(diff)
+    return w
+
+def differentiation_matrix_1st(x):
+    n = len(x)
+    w = barycentric_weights(x)
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                D[i, j] = (w[j] / w[i]) / (x[i] - x[j])
+        D[i, i] = -np.sum(D[i, :])
+    return D
+
+def differentiation_matrix_2nd(x):
+    n = len(x)
+    w = barycentric_weights(x)
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                D[i, j] = (w[j]/w[i])/(x[i]-x[j])
+        D[i, i] = -np.sum(D[i, :])
+    D2 = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                D2[i, j] = 2*D[i, j]*(D[i, i]-1.0/(x[i]-x[j]))
+        D2[i, i] = -np.sum(D2[i, :])
+    return D2
 
 
-def newton_refine_poly_from_coeffs(coeffs: np.ndarray, x0: float, maxiter=100, tol=1e-14):
-    p = np.poly1d(coeffs)
-    dp = np.poly1d(np.polyder(p))
-    x = x0
-    for _ in range(maxiter):
-        fx = p(x)
-        dfx = dp(x)
-        if dfx == 0:
-            break
-        x_new = x - fx / dfx
-        if abs(x_new - x) < tol:
-            return x_new
-        x = x_new
-    return x
+class Question2Page(QWidget):
+    def __init__(self, stacked=None):
+        super().__init__()
+        self.stacked=stacked
+        # layout: left = controls + tables, right = plot
+        main_layout = QHBoxLayout(self)
 
-class MainWindow(QtWidgets.QMainWindow):
+        # LEFT pane (controls + tables)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+
+        # Controls
+        box = QGroupBox("Gauss-Legendre (via Jacobi matrix)")
+        form = QFormLayout()
+        self.spin_n = QSpinBox(); self.spin_n.setRange(1, 64); self.spin_n.setValue(8)
+        form.addRow(QLabel("n (degree/points):"), self.spin_n)
+        self.btn_compute = QPushButton("Compute nodes & weights")
+        self.btn_compute.clicked.connect(self.compute_all)
+        form.addRow(self.btn_compute)
+        box.setLayout(form)
+        left_layout.addWidget(box)
+
+        # Table: nodes & weights (GW and Lagrange) and difference
+        self.tbl_nodes = QTableWidget()
+        self.tbl_nodes.setMinimumHeight(260)
+        left_layout.addWidget(QLabel("Nodes and weights (GW eigenvector method vs Lagrange)"))
+        left_layout.addWidget(self.tbl_nodes)
+
+        # Table: eigenvector norms & first components
+        self.tbl_evec = QTableWidget()
+        left_layout.addWidget(QLabel("Eigenvector norms and first components"))
+        left_layout.addWidget(self.tbl_evec)
+
+        # Export button row
+        row = QHBoxLayout()
+        self.btn_export_nodes = QPushButton("Export nodes/weights CSV")
+        self.btn_export_evec  = QPushButton("Export eigenvectors CSV")
+        row.addWidget(self.btn_export_nodes); row.addWidget(self.btn_export_evec)
+        self.btn_export_nodes.clicked.connect(self.export_nodes_csv)
+        self.btn_export_evec.clicked.connect(self.export_evec_csv)
+        left_layout.addLayout(row)
+        btn_back = QPushButton("← Back to Home")
+        btn_back.setStyleSheet("font-size: 14px; padding: 6px;")
+        btn_back.clicked.connect(lambda: self.stacked.setCurrentIndex(0))
+        left_layout.addWidget(btn_back)
+        left_layout.addStretch(1)
+
+        # RIGHT pane (plot)
+        self.canvas = MplCanvas(width=7, height=5, dpi=100)
+        # add to main layout
+        main_layout.addWidget(left, stretch=1)
+        main_layout.addWidget(self.canvas, stretch=2)
+
+        # storage
+        self.nodes = None
+        self.w_gw = None
+        self.w_lagr = None
+        self.evecs = None
+        self.evec_norms = None
+        self.evec_first = None
+
+    # ---- core compute function ----
+    def compute_all(self):
+        n = int(self.spin_n.value())
+        try:
+            evals, evecs, J = golub_welsch_jacobi(n)
+            # eigenvalues are nodes
+            nodes = evals.copy()
+            # eigenvectors: columns of evecs
+            w_gw, norms, first_comp = weights_from_evecs(evecs)
+            w_lagr = weights_via_lagrange_moments(nodes)
+            # --- Map nodes and weights from [-1,1] → [0,1] ---
+            nodes = 0.5 * (nodes + 1)   # shift and scale
+            w_gw = 0.5 * w_gw
+            w_lagr = 0.5 * w_lagr
+
+            # store
+            self.nodes = nodes
+            self.w_gw = w_gw
+            self.w_lagr = w_lagr
+            self.evecs = evecs
+            self.evec_norms = norms
+            self.evec_first = first_comp
+
+            # fill tables and plot
+            self.fill_nodes_table()
+            self.fill_evec_table()
+            self.plot_compare()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to compute: {e}")
+
+    def fill_nodes_table(self):
+        x = self.nodes; wg = self.w_gw; wl = self.w_lagr
+        n = len(x)
+        self.tbl_nodes.clear()
+        self.tbl_nodes.setColumnCount(4)
+        self.tbl_nodes.setRowCount(n)
+        self.tbl_nodes.setHorizontalHeaderLabels(["node (x_i)", "weight (GW from evecs)", "weight (Lagrange)", "diff"])
+        for i in range(n):
+            self.tbl_nodes.setItem(i, 0, QTableWidgetItem(f"{x[i]:.10f}"))
+            self.tbl_nodes.setItem(i, 1, QTableWidgetItem(f"{wg[i]:.12e}"))
+            self.tbl_nodes.setItem(i, 2, QTableWidgetItem(f"{wl[i]:.12e}"))
+            self.tbl_nodes.setItem(i, 3, QTableWidgetItem(f"{(wg[i]-wl[i]):.3e}"))
+        self.tbl_nodes.resizeColumnsToContents()
+
+    def fill_evec_table(self):
+        evecs = self.evecs
+        norms = self.evec_norms
+        first = self.evec_first
+        n = evecs.shape[1]
+        self.tbl_evec.clear()
+        self.tbl_evec.setColumnCount(3)
+        self.tbl_evec.setRowCount(n)
+        self.tbl_evec.setHorizontalHeaderLabels(["eig index", "L2 norm", "first component (normalized)"])
+        for i in range(n):
+            self.tbl_evec.setItem(i, 0, QTableWidgetItem(str(i+1)))
+            self.tbl_evec.setItem(i, 1, QTableWidgetItem(f"{norms[i]:.12e}"))
+            self.tbl_evec.setItem(i, 2, QTableWidgetItem(f"{first[i]:.12e}"))
+        self.tbl_evec.resizeColumnsToContents()
+
+    def plot_compare(self):
+        ax = self.canvas.ax
+        ax.clear()
+        x = self.nodes
+        ax.plot(x, self.w_gw, 'o-', label="GW weights (evecs)", linewidth=2, markersize=5)
+        ax.plot(x, self.w_lagr, 's--', label="Lagrange weights", linewidth=1.5, markersize=4)
+        ax.set_xlabel("nodes (roots)")
+        ax.set_ylabel("weights")
+        ax.set_title(f"n = {len(x)} : weights from eigenvectors vs Lagrange")
+        ax.legend()
+        ax.grid(True)
+        self.canvas.draw()
+
+    # ---- export helpers ----
+    def export_nodes_csv(self):
+        if self.nodes is None:
+            QMessageBox.warning(self, "No data", "Compute first")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save nodes & weights", "nodes_weights.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        arr = np.vstack([self.nodes, self.w_gw, self.w_lagr, (self.w_gw - self.w_lagr)]).T
+        np.savetxt(path, arr, header="node,w_gw,w_lagr,diff", delimiter=",", comments='')
+        QMessageBox.information(self, "Saved", f"Saved {path}")
+
+    def export_evec_csv(self):
+        if self.evecs is None:
+            QMessageBox.warning(self, "No data", "Compute first")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save eigenvectors", "eigenvectors.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        # Save norms and first components, and optionally eigenvectors matrix
+        header = "index,norm,first_component\n"
+        with open(path, 'w') as f:
+            f.write(header)
+            for i in range(self.evecs.shape[1]):
+                f.write(f"{i+1},{self.evec_norms[i]},{self.evec_first[i]}\n")
+        QMessageBox.information(self, "Saved", f"Saved {path}")
+
+import math
+from scipy.special import erf
+import matplotlib.pyplot as plt
+
+class Question3Page(QWidget):
+    def __init__(self, stacked=None):
+        super().__init__()
+        self.stacked = stacked
+
+        main_layout = QHBoxLayout(self)
+
+        # --- Left panel ---
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+
+        box = QGroupBox("Heat Equation Solver (Spectral Collocation)")
+        form = QFormLayout()
+
+        self.spin_nint = QSpinBox()
+        self.spin_nint.setRange(2, 128)
+        self.spin_nint.setValue(32)
+        form.addRow(QLabel("Interior collocation points (n):"), self.spin_nint)
+
+        self.edit_eta_max = QLineEdit("6.0")
+        form.addRow(QLabel("η_max (domain size):"), self.edit_eta_max)
+
+        self.spin_nab = QSpinBox()
+        self.spin_nab.setRange(2, 128)
+        self.spin_nab.setRange(2,128)
+        form.addRow(QLabel("n for A/B matrices:"), self.spin_nab)
+
+        self.btn_solve = QPushButton("Solve Heat Equation (Compare with Analytical)")
+        self.btn_solve.clicked.connect(self.solve_heat_equation)
+        form.addRow(self.btn_solve)
+
+        box.setLayout(form)
+        left_layout.addWidget(box)
+
+        # Export section
+        self.tableA = QTableWidget()
+        self.tableB = QTableWidget()
+        left_layout.addWidget(QLabel("A (D2) matrix:"))
+        left_layout.addWidget(self.tableA)
+        left_layout.addWidget(QLabel("B (weights) matrix:"))
+        left_layout.addWidget(self.tableB)
+
+        row = QHBoxLayout()
+        self.btn_expA = QPushButton("Export A")
+        self.btn_expB = QPushButton("Export B")
+        row.addWidget(self.btn_expA)
+        row.addWidget(self.btn_expB)
+        left_layout.addLayout(row)
+        self.btn_expA.clicked.connect(self.export_A)
+        self.btn_expB.clicked.connect(self.export_B)
+
+        self.status = QLabel("")
+        left_layout.addWidget(self.status)
+
+        # Back button
+        btn_back = QPushButton("← Back to Home")
+        btn_back.clicked.connect(lambda: self.stacked.setCurrentIndex(0))
+        left_layout.addWidget(btn_back)
+        left_layout.addStretch(1)
+
+        # --- Right panel with QTabWidget ---
+        self.tabs = QTabWidget()
+        self.tab_results = QWidget()
+        self.tab_errors = QWidget()
+
+        # --- Tab 1: results ---
+        layout_results = QVBoxLayout(self.tab_results)
+        self.canvas_main = MplCanvas(width=7, height=5, dpi=100)
+        layout_results.addWidget(self.canvas_main)
+
+        # --- Tab 2: absolute errors ---
+        layout_errors = QVBoxLayout(self.tab_errors)
+        self.tableErr = QTableWidget()
+        self.canvas_err = MplCanvas(width=7, height=5, dpi=100)
+        layout_errors.addWidget(QLabel("Absolute Error Table:"))
+        layout_errors.addWidget(self.tableErr)
+        layout_errors.addWidget(QLabel("Absolute Error Plot:"))
+        layout_errors.addWidget(self.canvas_err)
+
+        # Add both tabs
+        self.tabs.addTab(self.tab_results, "Results (f vs erf)")
+        self.tabs.addTab(self.tab_errors, "Absolute Errors")
+
+        main_layout.addWidget(left, stretch=1)
+        main_layout.addWidget(self.tabs, stretch=2)
+
+        # Storage
+        self.A = None
+        self.B = None
+        self.nodes = None
+
+    def solve_heat_equation(self):
+        try:
+            # --- User inputs ---
+            n_interior = int(self.spin_nint.value())
+            eta_max = float(self.edit_eta_max.text())
+            n_ab = int(self.spin_nab.value())
+
+            # --- Gauss–Legendre nodes on [-1,1] ---
+            xg, wg = golub_welsch_legendre(n_interior)
+            eta_int = 0.5 * eta_max * (xg + 1)
+            nodes_full = np.concatenate(([0.0], eta_int, [eta_max]))
+            n_full = len(nodes_full)
+
+            # --- Differentiation matrices for the heat equation ---
+            D1 = differentiation_matrix_1st(nodes_full)
+            D2 = D1 @ D1
+
+            # --- Build and solve system: f'' + 2ηf' = 0 ---
+            A_sys = np.zeros((n_full, n_full))
+            b = np.zeros(n_full)
+            for i in range(1, n_full - 1):
+                eta = nodes_full[i]
+                A_sys[i, :] = D2[i, :] + 2 * eta * D1[i, :]
+            A_sys[0, :] = 0; A_sys[0, 0] = 1; b[0] = 0
+            A_sys[-1, :] = 0; A_sys[-1, -1] = 1; b[-1] = 1
+
+            f_num = np.linalg.solve(A_sys, b)
+            f_exact = erf(nodes_full)
+            err = np.abs(f_num - f_exact)
+
+            # --- Plot main comparison ---
+            ax = self.canvas_main.ax
+            ax.clear()
+            ax.plot(nodes_full, f_exact, label="Analytical erf(η)", linewidth=2)
+            ax.plot(nodes_full, f_num, 'o--', label="Numerical", markersize=5)
+            ax.set_xlabel("η"); ax.set_ylabel("f(η)")
+            ax.legend(); ax.set_title("Heat Equation: Numerical vs Analytical")
+            ax.grid(True)
+            self.canvas_main.draw()
+
+            # --- Absolute error table & plot ---
+            self.fill_error_table(nodes_full, f_num, f_exact, err)
+            ax_e = self.canvas_err.ax
+            ax_e.clear()
+            ax_e.plot(nodes_full, err, 'ro-', linewidth=1.5, markersize=4)
+            ax_e.set_xlabel("η"); ax_e.set_ylabel("|Error|")
+            ax_e.set_title("Absolute Error Distribution")
+            ax_e.grid(True)
+            self.canvas_err.draw()
+
+            # --- Compute A and B exactly like in Question 1 ---
+            x_full, A_full, B_full = build_A_B_planar(n_ab)
+            self.A = A_full
+            self.B = B_full
+            self.nodes = x_full
+
+            # --- Show A and B in tables ---
+            self.fill_table(self.tableA, self.A)
+            self.fill_table(self.tableB, self.B)
+
+            # --- Status ---
+            self.status.setText(
+                f"Solved successfully for n={n_ab}. "
+                f"max|err|={np.max(err):.2e}, L2={np.sqrt(np.mean(err**2)):.2e}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+
+    def fill_error_table(self, nodes, f_num, f_exact, err):
+        n = len(nodes)
+        self.tableErr.clear()
+        self.tableErr.setRowCount(n)
+        self.tableErr.setColumnCount(4)
+        self.tableErr.setHorizontalHeaderLabels(["η", "Numerical", "Analytical", "|Error|"])
+        for i in range(n):
+            self.tableErr.setItem(i, 0, QTableWidgetItem(f"{nodes[i]:.6f}"))
+            self.tableErr.setItem(i, 1, QTableWidgetItem(f"{f_num[i]:.6e}"))
+            self.tableErr.setItem(i, 2, QTableWidgetItem(f"{f_exact[i]:.6e}"))
+            self.tableErr.setItem(i, 3, QTableWidgetItem(f"{err[i]:.3e}"))
+        self.tableErr.resizeColumnsToContents()
+
+    def fill_table(self, table, M):
+        n, m = M.shape
+        table.clear()
+        table.setRowCount(n)
+        table.setColumnCount(m)
+        for i in range(n):
+            for j in range(m):
+                table.setItem(i, j, QTableWidgetItem(f"{M[i,j]:.4e}"))
+        table.resizeColumnsToContents()
+
+    def export_A(self):
+        if self.A is None:
+            QMessageBox.warning(self, "No Data", "Compute first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save A", "A_Q3.csv", "CSV Files (*.csv)")
+        if path:
+            np.savetxt(path, self.A, delimiter=",")
+            QMessageBox.information(self, "Saved", f"Saved {path}")
+
+    def export_B(self):
+        if self.B is None:
+            QMessageBox.warning(self, "No Data", "Compute first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save B", "B_Q3.csv", "CSV Files (*.csv)")
+        if path:
+            np.savetxt(path, self.B, delimiter=",")
+            QMessageBox.information(self, "Saved", f"Saved {path}")
+# ---------------- Question 1 Page ----------------
+class Question1Page(QWidget):
+    def __init__(self, stacked=None):
+        super().__init__()
+        self.stacked=stacked
+
+        # ---------- Main horizontal layout ----------
+        main_layout = QHBoxLayout(self)
+
+        # ---------- LEFT SIDE ----------
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+
+        # Input section
+        box = QGroupBox("Inputs")
+        form = QFormLayout()
+
+        self.edit_range = QLineEdit("8-32")
+        form.addRow(QLabel("Plot n range:"), self.edit_range)
+
+        self.spin_n = QSpinBox()
+        self.spin_n.setRange(2, 64)
+        self.spin_n.setValue(32)
+        form.addRow(QLabel("n for A,B matrices:"), self.spin_n)
+
+        # Buttons
+        self.btn_plot = QPushButton("Plot Weights vs Roots")
+        self.btn_plot.clicked.connect(self.plot_weights_vs_roots)
+        self.btn_build = QPushButton("Compute A (D1) and B (D2)")
+        self.btn_build.clicked.connect(self.build_matrices)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.btn_plot)
+        btn_row.addWidget(self.btn_build)
+        form.addRow(btn_row)
+
+        box.setLayout(form)
+        left_layout.addWidget(box)
+
+        # Tables for A and B
+        self.tableA = QTableWidget()
+        self.tableB = QTableWidget()
+        left_layout.addWidget(QLabel("Matrix A (D1):"))
+        left_layout.addWidget(self.tableA)
+        left_layout.addWidget(QLabel("Matrix B (D2):"))
+        left_layout.addWidget(self.tableB)
+
+        # Export buttons
+        exp_row = QHBoxLayout()
+        self.btn_expA = QPushButton("Export A to CSV")
+        self.btn_expB = QPushButton("Export B to CSV")
+        exp_row.addWidget(self.btn_expA)
+        exp_row.addWidget(self.btn_expB)
+        self.btn_expA.clicked.connect(self.export_A)
+        self.btn_expB.clicked.connect(self.export_B)
+        left_layout.addLayout(exp_row)
+
+        self.status = QLabel("")
+        left_layout.addWidget(self.status)
+        btn_back = QPushButton("← Back to Home")
+        btn_back.setStyleSheet("font-size: 14px; padding: 6px;")
+        btn_back.clicked.connect(lambda: self.stacked.setCurrentIndex(0))
+        left_layout.addWidget(btn_back)
+        left_layout.addStretch(1)
+
+        # ---------- RIGHT SIDE ----------
+        self.canvas = MplCanvas(width=7, height=5, dpi=100)
+
+        # ---------- Combine left and right ----------
+        main_layout.addWidget(left_widget, stretch=1)
+        main_layout.addWidget(self.canvas, stretch=2)
+
+        # ---------- Internal storage ----------
+        self.A = None
+        self.B = None
+        self.nodes = None
+
+    # ------------- Functional Parts (same as before) -------------
+    def plot_weights_vs_roots(self):
+        try:
+            txt = self.edit_range.text().strip()
+            n1, n2 = map(int, txt.split('-'))
+            ax = self.canvas.ax
+            ax.clear()
+            for n in range(n1, n2+1):
+                x, w_gw = golub_welsch_legendre(n)
+                w_lg = weights_via_lagrange_moments(x)
+                ax.plot(x, w_gw, 'o-', markersize=3, label=f"n={n}")
+            ax.set_xlabel("Roots")
+            ax.set_ylabel("Weights")
+            ax.legend(loc='best', fontsize=8)
+            ax.set_title(f"Gauss–Legendre Weights vs Roots (n={n1}–{n2})")
+            self.canvas.draw()
+            self.status.setText("Plotted Gauss–Legendre weights vs roots.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def build_matrices(self):
+        try:
+            n = self.spin_n.value()
+
+            # --- full collocation grid: endpoints + interior GL nodes on [0,1]
+            x, A, B = build_A_B_planar(n)   # sizes: (n+2)×(n+2)
+
+            self.nodes, self.A, self.B = x, A, B
+            self.fill_table(self.tableA, A)
+            self.fill_table(self.tableB, B)
+
+            # A has a nullspace (constants), so cond is inf: don't scare the user
+            self.status.setText(f"A,B computed for n={n} on [0,1] (size {A.shape[0]}×{A.shape[1]}).")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+
+    def fill_table(self, table, M):
+        n, m = M.shape
+        table.clear()
+        table.setRowCount(n)
+        table.setColumnCount(m)
+        for i in range(n):
+            for j in range(m):
+                item = QTableWidgetItem(f"{M[i,j]:.4e}")
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                table.setItem(i, j, item)
+        table.resizeColumnsToContents()
+
+    def export_A(self):
+        if self.A is None:
+            QMessageBox.warning(self, "Missing", "Compute A first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save A", "A_D1.csv", "CSV Files (*.csv)")
+        if path:
+            np.savetxt(path, self.A, delimiter=",")
+            QMessageBox.information(self, "Saved", f"Saved {path}")
+
+    def export_B(self):
+        if self.B is None:
+            QMessageBox.warning(self, "Missing", "Compute B first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save B", "B_D2.csv", "CSV Files (*.csv)")
+        if path:
+            np.savetxt(path, self.B, delimiter=",")
+            QMessageBox.information(self, "Saved", f"Saved {path}")
+
+
+# ---------------- Home Page ----------------
+class HomePage(QWidget):
+    def __init__(self, stacked_widget):
+        super().__init__()
+        self.stacked = stacked_widget
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel("CH2120 Assignment GUI\nSelect a Question")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("font-size: 22px; font-weight: bold; margin: 20px;")
+        layout.addWidget(lbl)
+
+        # --- Add three buttons ---
+        btn1 = QPushButton("Question 1(part A): Gauss–Legendre & Collocation")
+        btn2 = QPushButton("Question 1(Part B) — Nodes and Weights")
+        btn3 = QPushButton("Question 2: Heat Equation Solver")
+
+
+        for b in (btn1, btn2, btn3):
+            b.setMinimumHeight(60)
+            b.setStyleSheet("font-size: 18px;")
+
+        layout.addWidget(btn1)
+        layout.addWidget(btn2)
+        layout.addWidget(btn3)
+        layout.addStretch()
+
+        # --- Link buttons to pages ---
+        btn1.clicked.connect(lambda: self.stacked.setCurrentIndex(1))
+        btn2.clicked.connect(lambda: self.stacked.setCurrentIndex(2))
+        btn3.clicked.connect(lambda: self.stacked.setCurrentIndex(3))
+
+
+
+# ---------------- Main Window ----------------
+class AssignmentMain(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Harshad & Shifted-Legendre Toolbox — robust coefficients")
-        self.resize(1000, 700)
-        font = self.font()
-        font.setPointSize(10)
-        self.setFont(font)
+        self.setWindowTitle("CH2120 Assignment GUI")
+        self.resize(1200, 800)
 
-        # ---------------------------
-        # Create the tab widget (unchanged)
-        # ---------------------------
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self.tab_factorial_ui(), "Factorial Harshad")
-        self.tabs.addTab(self.tab_consecutive_ui(), "Consecutive Harshad")
-        self.tabs.addTab(self.tab_legendre_ui(), "Shifted Legendre (0,1)")
+        self.stacked = QStackedWidget()
+        self.setCentralWidget(self.stacked)
 
-        # ---------------------------
-        # Create stacked widget with Home page + Tabs
-        # ---------------------------
-        self.stack = QtWidgets.QStackedWidget()
+        self.home = HomePage(self.stacked)
+        self.q1 = Question1Page(self.stacked)
+        self.q2 = Question2Page(self.stacked)
+        self.q3 = Question3Page(self.stacked)
 
-        # --- Home page ---
-        home = QtWidgets.QWidget()
-        home_layout = QtWidgets.QVBoxLayout()
-        home_layout.setContentsMargins(30, 30, 30, 30)
-        home_layout.setSpacing(20)
-
-        title = QtWidgets.QLabel("📘 Harshad & Shifted-Legendre Toolbox")
-        title.setAlignment(QtCore.Qt.AlignCenter)
-        title.setFont(QtGui.QFont("Segoe UI", 18, QtGui.QFont.Bold))
-        subtitle = QtWidgets.QLabel("Choose a module to continue")
-        subtitle.setAlignment(QtCore.Qt.AlignCenter)
-        subtitle.setFont(QtGui.QFont("Segoe UI", 11))
-
-        home_layout.addWidget(title)
-        home_layout.addWidget(subtitle)
-        home_layout.addSpacing(12)
-
-        # Button style (keeps consistent look with your app)
-        btn_style = """
-            QPushButton {
-                font-size: 15px;
-                padding: 14px;
-                border-radius: 10px;
-                background-color: #2A2A2A;
-                color: #E0E0E0;
-                border: 2px solid #333;
-            }
-            QPushButton:hover {
-                background-color: #0078D7;
-                color: #FFFFFF;
-            }
-        """
-
-        btn_harshad = QtWidgets.QPushButton("🔢 Harshad Numbers")
-        btn_legendre = QtWidgets.QPushButton("🧮 Shifted Legendre (0,1)")
-        btn_consec = QtWidgets.QPushButton("📊 Consecutive Harshads")
-
-        for b in (btn_harshad, btn_legendre, btn_consec):
-            b.setStyleSheet(btn_style)
-            b.setMinimumHeight(64)
-            home_layout.addWidget(b)
-
-        home_layout.addStretch()
-        home.setLayout(home_layout)
-
-        # Add pages to stack: home (0), tabs (1)
-        self.stack.addWidget(home)
-        self.stack.addWidget(self.tabs)
-
-        # Set the stack as central widget
-        self.setCentralWidget(self.stack)
-
-        # Wire home buttons to show tabs (page index 1) and choose correct tab index
-        btn_harshad.clicked.connect(lambda: (self.stack.setCurrentIndex(1), self.tabs.setCurrentIndex(0)))
-        btn_consec.clicked.connect(lambda: (self.stack.setCurrentIndex(1), self.tabs.setCurrentIndex(1)))
-        btn_legendre.clicked.connect(lambda: (self.stack.setCurrentIndex(1), self.tabs.setCurrentIndex(2)))
-
-        # ----- Dark Mode Styling (unchanged) -----
-        # ----- Modern Polished Dark Theme -----
+        self.stacked.addWidget(self.home)
+        self.stacked.addWidget(self.q1)
+        self.stacked.addWidget(self.q2)
+        self.stacked.addWidget(self.q3)
+                # --- Apply professional dark-blue theme ---
         self.setStyleSheet("""
+            QMainWindow {
+                background-color: #1E1E2E;
+            }
+
             QWidget {
-                background-color: #23272E;
-                color: #ECEFF4;
-                font-family: 'Segoe UI';
+                background-color: #1E1E2E;
+                color: #F1F5F9;
+                font-family: "Segoe UI", "Inter", sans-serif;
+                font-size: 10.5pt;
+            }
+
+            QLabel {
+                color: #F1F5F9;
                 font-size: 11pt;
             }
 
-            /* ----- Tabs ----- */
-            QTabWidget::pane {
-                border: 1px solid #3B4252;
-                background-color: #2E3440;
-                border-radius: 8px;
-                padding: 4px;
+            QGroupBox {
+                border: 2px solid #3B3B4F;
+                border-radius: 10px;
+                margin-top: 10px;
+                padding: 10px;
+                font-weight: bold;
+                color: #E0E7FF;
+                background-color: #25253A;
             }
+
+            QLineEdit, QSpinBox, QTableWidget, QTabWidget::pane {
+                background-color: #27293D;
+                color: #E2E8F0;
+                border: 1px solid #3B3B4F;
+                border-radius: 6px;
+                selection-background-color: #4F46E5;
+            }
+
+            QTableWidget {
+                gridline-color: #3B3B4F;
+                alternate-background-color: #222338;
+                selection-color: white;
+                selection-background-color: #4F46E5;
+            }
+
+            QHeaderView::section {
+                background-color: #334155;
+                color: #F8FAFC;
+                border: none;
+                padding: 5px;
+            }
+
+            QPushButton {
+                background-color: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #4F46E5, stop: 1 #3B82F6
+                );
+                color: white;
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-weight: 600;
+            }
+
+            QPushButton:hover {
+                background-color: qlineargradient(
+                    x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #6366F1, stop: 1 #60A5FA
+                );
+            }
+
+            QPushButton:pressed {
+                background-color: #4338CA;
+            }
+
             QTabBar::tab {
-                background-color: #3B4252;
-                color: #ECEFF4;
-                padding: 8px 18px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
+                background-color: #27293D;
+                color: #E2E8F0;
+                padding: 8px 16px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
                 margin-right: 2px;
             }
+
             QTabBar::tab:selected {
-                background-color: #5E81AC;
-                color: #FFFFFF;
-                font-weight: 600;
-            }
-            QTabBar::tab:hover {
-                background-color: #81A1C1;
-                color: #FFFFFF;
+                background-color: #4F46E5;
+                color: white;
             }
 
-            /* ----- Buttons ----- */
-            QPushButton {
-                background-color: #4FC3F7;
-                color: #23272E;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 14px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #81D4FA;
-            }
-            QPushButton:pressed {
-                background-color: #29B6F6;
-                color: #FFFFFF;
-            }
-
-            /* ----- Labels ----- */
-            QLabel {
-                font-weight: 500;
-                color: #E5E9F0;
-            }
-
-            /* ----- LineEdits, SpinBoxes, Text areas ----- */
-            QLineEdit, QSpinBox, QTextEdit {
-                background-color: #2E3440;
-                color: #ECEFF4;
-                border: 1px solid #3B4252;
-                border-radius: 6px;
-                padding: 6px;
-            }
-
-            QTextEdit {
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 10pt;
-            }
-
-            /* ----- ProgressBar ----- */
-            QProgressBar {
-                background-color: #2E3440;
-                color: #ECEFF4;
-                border: 1px solid #3B4252;
-                border-radius: 6px;
-                text-align: center;
-                height: 20px;
-            }
-            QProgressBar::chunk {
-                background-color: #5E81AC;
-                border-radius: 6px;
-            }
-
-            /* ----- Scrollbars ----- */
             QScrollBar:vertical {
-                background: #2E3440;
-                width: 10px;
-                margin: 2px;
-                border-radius: 5px;
+                background-color: #1E1E2E;
+                width: 12px;
+                margin: 15px 3px 15px 3px;
+                border-radius: 4px;
             }
             QScrollBar::handle:vertical {
-                background: #5E81AC;
-                border-radius: 5px;
+                background-color: #4F46E5;
+                border-radius: 4px;
                 min-height: 20px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #81A1C1;
-            }
-
-            /* ----- Tooltips ----- */
-            QToolTip {
-                background-color: #4C566A;
-                color: #ECEFF4;
-                border: 1px solid #81A1C1;
-                border-radius: 4px;
-                padding: 4px;
+                background-color: #6366F1;
             }
         """)
 
-
-    # Tab 1
-    def tab_factorial_ui(self):
-        w = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout()
-
-        # Back (Home) button - top of tab
-        back_btn = QtWidgets.QPushButton("🏠 Home")
-        back_btn.setFixedSize(100, 30)
-        back_btn.setStyleSheet("background-color: #2A2A2A; color: #E0E0E0; border-radius:6px;")
-        back_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        layout.addWidget(back_btn, alignment=QtCore.Qt.AlignLeft)
-
-        t1_question = QtWidgets.QLabel(
-            "TAB 1: Check if factorials are Harshad numbers\n"
-            "Input two numbers (start and end). For each number n in the range, "
-            "check if n! is a Harshad number. \n"
-            "At the end, print the number of required factorials which are NOT Harshad."
-        )
-        t1_question.setWordWrap(True)
-        t1_question.setStyleSheet(
-            "color: #00BFFF; font-weight: 600; font-size: 10pt; "
-            "border: 1px solid #333; border-radius: 8px; padding: 8px; "
-            "background-color: #1C1C1C;"
-        )
-
-        layout.addWidget(t1_question)
-       
-        self.t1_progress = QtWidgets.QProgressBar()
-        self.t1_progress.setRange(0, 100)
-        self.t1_progress.setValue(0)
-        self.t1_progress.setTextVisible(True)
-        self.t1_progress.setFormat("Progress: %p%")
-        self.t1_progress.setStyleSheet("""
-            QProgressBar {
-                background-color: #1E1E1E;
-                color: #E0E0E0;
-                border: 1px solid #333;
-                border-radius: 6px;
-                text-align: center;
-                height: 20px;
-            }
-            QProgressBar::chunk {
-                background-color: #0078D7;
-                border-radius: 6px;
-            }
-        """)
-        layout.addWidget(self.t1_progress)
-
-
-        form = QtWidgets.QFormLayout()
-        self.t1_start = QtWidgets.QSpinBox(); self.t1_start.setRange(1, 10000000); self.t1_start.setValue(1)
-        self.t1_end = QtWidgets.QSpinBox(); self.t1_end.setRange(1, 10000000); self.t1_end.setValue(500)
-        form.addRow("Start n:", self.t1_start)
-        form.addRow("End n:", self.t1_end)
-        self.t1_count = QtWidgets.QSpinBox()
-        self.t1_count.setRange(-1, 100)
-        self.t1_count.setValue(-1)
-        form.addRow("How many non-Harshad factorials to find:", self.t1_count)
-
-        btn = QtWidgets.QPushButton("Run factorial Harshad checks")
-        btn.clicked.connect(self.on_run_factorial)
-        form.addRow(btn)
-        self.t1_output = QtWidgets.QTextEdit(); self.t1_output.setReadOnly(True)
-        layout.addLayout(form)
-        layout.addWidget(self.t1_output)
-        w.setLayout(layout)
-        return w
-
-    def on_run_factorial(self):
-        start = int(self.t1_start.value())
-        end = int(self.t1_end.value())
-        count_needed = int(self.t1_count.value())
-
-        self.t1_output.clear()
-        self.t1_progress.setValue(0)
-        if start > end:
-            self.t1_output.append("❌ Invalid range: Start must be ≤ End.")
-            return
-
-        # info header
-        if count_needed == -1:
-            self.t1_output.append(
-                f"Checking factorial Harshad status from {start}! to {end}! — "
-                f"showing ALL non-Harshad factorials.\n"
-            )
-        else:
-            self.t1_output.append(
-                f"Checking factorial Harshad status from {start}! to {end}! — "
-                f"showing first {count_needed} non-Harshad factorials (if found).\n"
-            )
-
-        non_harshad = []
-        total = end - start + 1
-
-        for i, n in enumerate(range(start, end + 1), start=1):
-            f =gmpy2.fac(n)
-            s = sum(int(d) for d in str(f))
-            is_harshad = (s != 0 and f % s == 0)
-
-            if is_harshad:
-                self.t1_output.append(f"{n}! → YES (Harshad)")
-            else:
-                self.t1_output.append(f"{n}! → NO (Not Harshad)")
-                non_harshad.append(n)
-
-            # update progress
-            self.t1_progress.setValue(int(i / total * 100))
-
-            # break only if k is specified (not -1)
-            if count_needed != -1 and len(non_harshad) >= count_needed:
-                break
-
-        self.t1_progress.setValue(100)
-
-        # Summary output
-        if non_harshad:
-            self.t1_output.append("\n✅ Summary:")
-            if count_needed == -1:
-                self.t1_output.append(
-                    f"All non-Harshad factorials in range: " +
-                    ", ".join(f"{x}!" for x in non_harshad)
-                )
-            else:
-                self.t1_output.append(
-                    f"First {len(non_harshad)} non-Harshad factorials: " +
-                    ", ".join(f"{x}!" for x in non_harshad)
-                )
-        else:
-            self.t1_output.append("\nAll factorials in the given range are Harshad numbers!")
-
-    # Tab 2
-    def tab_consecutive_ui(self):
-        w = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout()
-
-        # Back (Home) button - top of tab
-        back_btn = QtWidgets.QPushButton("🏠 Home")
-        back_btn.setFixedSize(100, 30)
-        back_btn.setStyleSheet("background-color: #2A2A2A; color: #E0E0E0; border-radius:6px;")
-        back_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        layout.addWidget(back_btn, alignment=QtCore.Qt.AlignLeft)
-
-        t2_question = QtWidgets.QLabel(
-            " Input two integers (a,b)\n"
-            "To find sequence of consecutive harshad numbers of length a to b.\n"
-        )
-        t2_question.setWordWrap(True)
-        t2_question.setStyleSheet(
-            "color: #00BFFF; font-weight: 600; font-size: 10pt; "
-            "border: 1px solid #333; border-radius: 8px; padding: 8px; "
-            "background-color: #1C1C1C;"
-        )
-        layout.addWidget(t2_question)
-        self.t2_progress = QtWidgets.QProgressBar()
-        self.t2_progress.setRange(0, 100)
-        self.t2_progress.setValue(0)
-        self.t2_progress.setTextVisible(True)
-        self.t2_progress.setFormat("Progress: %p%")
-        self.t2_progress.setStyleSheet("""
-            QProgressBar {
-                background-color: #1E1E1E;
-                color: #E0E0E0;
-                border: 1px solid #333;
-                border-radius: 6px;
-                text-align: center;
-                height: 20px;
-            }
-            QProgressBar::chunk {
-                background-color: #0078D7;
-                border-radius: 6px;
-            }
-        """)
-        layout.addWidget(self.t2_progress)
-
-        form = QtWidgets.QFormLayout()
-
-# Range inputs
-        self.t2_a = QtWidgets.QSpinBox()
-        self.t2_a.setRange(1, 1000)
-        self.t2_a.setValue(5)
-
-        self.t2_b = QtWidgets.QSpinBox()
-        self.t2_b.setRange(1, 1000)
-        self.t2_b.setValue(10)
-
-        form.addRow("Enter range (a, b):", QtWidgets.QLabel("Find consecutive Harshad sequences for all n in [a, b]"))
-        form.addRow("a (start):", self.t2_a)
-        form.addRow("b (end):", self.t2_b)
-
-        btn = QtWidgets.QPushButton("Run for range [a, b]")
-        btn.clicked.connect(self.on_run_consecutive)
-        form.addRow(btn)
-
-        self.t2_output = QtWidgets.QTextEdit(); self.t2_output.setReadOnly(True)
-        layout.addLayout(form)
-        layout.addWidget(self.t2_output)
-        w.setLayout(layout)
-        return w
-    def run_single_consecutive(self, n):
-        from PyQt5.QtCore import QCoreApplication
-        import time
-
-        self.t2_progress.setValue(0)
-        QCoreApplication.processEvents()
-
-    # (Insert your ENTIRE old single-n logic here)
-
-    def on_run_consecutive(self):
-        from PyQt5.QtCore import QCoreApplication
-        import time
-
-        a = int(self.t2_a.value())
-        b = int(self.t2_b.value())
-
-        self.t2_output.clear()
-        self.t2_progress.setValue(0)
-
-        if a > b:
-            self.t2_output.append("⚠️ Invalid range: a must be ≤ b.")
-            return
-
-        # ---------- Helper functions ----------
-        def digit_sum(x):
-            return sum(int(d) for d in str(x))
-
-        def is_harshad(x):
-            s = digit_sum(x)
-            return s != 0 and x % s == 0
-
-        # ---------- Known second sequences for n = 5..10 ----------
-        second_sequences = {
-            5:  [6, 7, 8, 9, 10],
-            6:  [1030302012, 1030302013, 1030302014, 1030302015, 1030302016, 1030302017],
-            7:  [1030302012, 1030302013, 1030302014, 1030302015, 1030302016, 1030302017, 1030302018],
-            8:  [124324220, 124324221, 124324222, 124324223, 124324224, 124324225, 124324226, 124324227],
-            9:  [211315436680, 211315436681, 211315436682, 211315436683, 211315436684, 211315436685,
-                211315436686, 211315436687, 211315436688],
-            10: [602102100620, 602102100621, 602102100622, 602102100623, 602102100624, 602102100625,
-                602102100626, 602102100627, 602102100628, 602102100629]
-        }
-
-        # ---------- Simulated computation delays ----------
-        simulated_delays = {5: 1, 6: 3, 7: 3, 8: 4, 9: 2, 10: 7}
-
-        # ---------- Main loop for all n in [a, b] ----------
-        for n in range(a, b + 1):
-            self.t2_output.append(f"\n\n==============================")
-            self.t2_output.append(f"🔢 Computing for n = {n} consecutive Harshad numbers")
-            self.t2_output.append("==============================\n")
-            QCoreApplication.processEvents()
-
-            self.t2_progress.setValue(0)
-
-            # ---------- Case for n = 11 or 12 ----------
-            if n in [11, 12]:
-                self.t2_output.append(f"🔍 Attempting to find {n} consecutive Harshad numbers starting from 1...\n")
-                self.t2_output.append("This is a live computation and may take a few seconds to simulate the real search.\n")
-                QCoreApplication.processEvents()
-
-                start_time = time.time()
-                count = 0
-                start_candidate = None
-                fake_limit = 0
-
-                while time.time() - start_time < 10:
-                    fake_limit += 1
-                    if is_harshad(fake_limit):
-                        if count == 0:
-                            start_candidate = fake_limit
-                        count += 1
-                    else:
-                        count = 0
-
-                    if fake_limit % 5000 == 0:
-                        self.t2_output.append(f"Checked up to {fake_limit:,}...")
-                        progress = min(int((time.time() - start_time) / 10 * 60), 60)
-                        self.t2_progress.setValue(progress)
-                        QCoreApplication.processEvents()
-
-                self.t2_output.append("\n⏳ Stopping real search — reached time limit (≈10 seconds).")
-                self.t2_output.append("Computation from 1 up to the true region (≈10¹⁴–10¹⁹) would take millions of years even on supercomputers.\n")
-                QCoreApplication.processEvents()
-                time.sleep(1)
-
-                if n == 11:
-                    known_value = 920_067_411_130_599
-                    start_range = 920_067_411_120_000
-                    end_range = 920_067_411_140_000
-                else:
-                    known_value = 43_494_229_746_440_272_890
-                    start_range = known_value - 2_000_000
-                    end_range = known_value + 100
-
-                self.t2_output.append(f"🔎 Now scanning the actual analytical window for {n} consecutive Harshads:")
-                self.t2_output.append(f"[{start_range}, {end_range}]...\n")
-                QCoreApplication.processEvents()
-
-                total = end_range - start_range + 1
-                count = 0
-                start_candidate = None
-                found_start = None
-                last_progress = 0
-                real_start = time.time()
-
-                for i, num in enumerate(range(start_range, end_range + 1), start=1):
-                    if is_harshad(num):
-                        if count == 0:
-                            start_candidate = num
-                        count += 1
-                        if count == n:
-                            found_start = start_candidate
-                            break
-                    else:
-                        count = 0
-
-                    if i - last_progress >= 2000 or i == total:
-                        progress = 60 + int(i / total * 40)
-                        self.t2_progress.setValue(progress)
-                        QCoreApplication.processEvents()
-                        last_progress = i
-
-                elapsed_real = time.time() - real_start
-                self.t2_progress.setValue(100)
-
-                if found_start:
-                    seq = [str(found_start + k) for k in range(n)]
-                    self.t2_output.append(f"✅ Found {n} consecutive Harshad numbers starting at {found_start:,}:")
-                    self.t2_output.append(", ".join(seq))
-                else:
-                    self.t2_output.append(f"⚠️ No exact sequence found in this window. Using known analytical reference: {known_value:,}")
-
-                self.t2_output.append(f"\n🕒 Analytical region computation time: {elapsed_real:.3f} seconds.")
-                self.t2_output.append("\n————————————————————————————————————————————")
-                self.t2_output.append("📘 Why the full computation is impossible:")
-                self.t2_output.append(f"Finding such a block by brute force from 1 would require checking up to {'≈10¹⁵' if n == 11 else '≈10²⁰'} numbers — far beyond practical limits.")
-                self.t2_output.append("\n📗 Why 20 consecutive Harshads are impossible:")
-                self.t2_output.append("Harshad numbers depend on divisibility by their digit sum. Digit sums change unpredictably, so divisibility can’t persist across long runs.")
-                continue
-
-            # ---------- Case for n = 5 to 10 ----------
-            elif 5 <= n <= 10:
-                seq1 = list(range(1, n + 1))
-                self.t2_output.append(f"🔍 Searching for {n} consecutive Harshad numbers (simulated)...\n")
-                self.t2_output.append(f"✅ Sequence 1 (trivial): {', '.join(map(str, seq1))}\n")
-                QCoreApplication.processEvents()
-
-                delay = simulated_delays[n]
-                self.t2_output.append(f"⚙️ Searching for second sequence (non-trivial, beyond 10)... This may take ≈{delay} seconds...\n")
-                QCoreApplication.processEvents()
-
-                start_time = time.time()
-                while time.time() - start_time < delay:
-                    elapsed = time.time() - start_time
-                    progress = int(elapsed / delay * 90)
-                    self.t2_progress.setValue(progress)
-                    QCoreApplication.processEvents()
-                    time.sleep(0.1)
-
-                seq2 = second_sequences[n]
-                self.t2_output.append(f"\n✅ Sequence 2 (non-trivial, starting at {seq2[0]:,}):")
-                self.t2_output.append(", ".join(str(x) for x in seq2))
-                self.t2_progress.setValue(100)
-                continue
-
-            # ---------- Case for n = 2 to 4 ----------
-            elif 2 <= n <= 4:
-                self.t2_output.append(f"🔍 Searching for two sequences of {n} consecutive Harshad numbers...\n")
-                QCoreApplication.processEvents()
-
-                start_time = time.time()
-                seq1 = list(range(1, n + 1))
-                self.t2_output.append(f"✅ Sequence 1 (trivial): {', '.join(map(str, seq1))}\n")
-                QCoreApplication.processEvents()
-
-                self.t2_output.append(f"⚙️ Searching for non-trivial sequence beyond 10 using digit-sum...\n")
-                QCoreApplication.processEvents()
-
-                count = 0
-                start_candidate = None
-                found_start = None
-                start_range = 50 * n
-                end_range = start_range + 1_000_000
-                last_update = 0
-
-                for i, num in enumerate(range(start_range, end_range), start=1):
-                    if is_harshad(num):
-                        if count == 0:
-                            start_candidate = num
-                        count += 1
-                        if count == n:
-                            found_start = start_candidate
-                            break
-                    else:
-                        count = 0
-
-                    if i - last_update >= 20_000:
-                        progress = min(int((i / (end_range - start_range)) * 100), 100)
-                        self.t2_progress.setValue(progress)
-                        QCoreApplication.processEvents()
-                        last_update = i
-
-                self.t2_progress.setValue(100)
-                elapsed = time.time() - start_time
-
-                if found_start:
-                    seq2 = [found_start + i for i in range(n)]
-                    self.t2_output.append(f"\n✅ Sequence 2 (non-trivial): {', '.join(map(str, seq2))}")
-                else:
-                    self.t2_output.append(f"\n❌ No non-trivial sequence found in range [{start_range}, {end_range}]")
-
-                self.t2_output.append(f"\n🕒 Computation completed in {elapsed:.3f} seconds.")
-                self.t2_output.append("\n————————————————————————————————————————————")
-                self.t2_output.append(
-                    "📘 Explanation:\n"
-                    f"Sequence 1 is always the trivial 1–{n}. "
-                    f"The second sequence is found using the digit-sum divisibility rule "
-                    f"to detect {n} consecutive Harshad numbers beyond 10."
-                )
-                continue
-
-            # ---------- Default (n > 12) ----------
-            else:
-                self.t2_output.append(f"⚠️ No known sequence of {n} consecutive Harshad numbers exists.")
-                self.t2_progress.setValue(100)
-                continue
-
-        self.t2_output.append(f"\n✅ Completed all computations for range [{a}, {b}].")
-        self.t2_output.append("\n————————————————————————————————————————————")
-        self.t2_output.append("📘 Why no 20 consecutive Harshad numbers exist:")
-        self.t2_output.append(
-            "• Digit sums vary irregularly: As numbers increase, their digit sums don’t follow a smooth pattern. "
-            "This makes it increasingly unlikely that every number in a long stretch will be divisible by its digit sum.\n"
-            "• Divisibility breaks down: Eventually, a number will appear whose digit sum does not divide it evenly, "
-            "breaking the Harshad streak.\n"
-            "• Density drops: Harshad numbers become less frequent as numbers grow larger. "
-            "Their density among integers decreases, making long consecutive runs rarer."
-        )
-
-
-    # Tab 3: Legendre outputs exactly as requested
-    def tab_legendre_ui(self):
-        w = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout()
-
-        # Back (Home) button
-        back_btn = QtWidgets.QPushButton("🏠 Home")
-        back_btn.setFixedSize(100, 30)
-        back_btn.setStyleSheet("background-color: #2A2A2A; color: #E0E0E0; border-radius:6px;")
-        back_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        layout.addWidget(back_btn, alignment=QtCore.Qt.AlignLeft)
-
-        # Instruction label
-        t3_question = QtWidgets.QLabel(
-            "TAB 3: Shifted Legendre Polynomial Tools (Domain [0, 1])\n"
-            "Input an integer n (up to 20000). Use the buttons below to perform each step individually."
-        )
-        t3_question.setWordWrap(True)
-        t3_question.setStyleSheet(
-            "color: #00BFFF; font-weight: 600; font-size: 10pt; "
-            "border: 1px solid #333; border-radius: 8px; padding: 8px; "
-            "background-color: #1C1C1C;"
-        )
-        layout.addWidget(t3_question)
-
-        # Input
-        form = QtWidgets.QFormLayout()
-        self.t3_n = QtWidgets.QSpinBox()
-        self.t3_n.setRange(1, 20000)
-        self.t3_n.setValue(100)
-        form.addRow("Order n:", self.t3_n)
-        self.t3_n.valueChanged.connect(self._on_legendre_n_changed)
-        layout.addLayout(form)
-
-        # --- Buttons for each step ---
-        btn_style = (
-            "QPushButton {background-color: #0078D7; color: white; border-radius: 6px; "
-            "padding: 6px 10px; font-weight: 600;} "
-            "QPushButton:hover {background-color: #339CFF;}"
-        )
-
-        buttons_layout = QtWidgets.QGridLayout()
-
-        self.btn_coeffs = QtWidgets.QPushButton("1️⃣ Coefficients")
-        self.btn_companion = QtWidgets.QPushButton("2️⃣ Companion Matrix")
-        self.btn_eigs = QtWidgets.QPushButton("3️⃣ Eigenvalues")
-        self.btn_roots = QtWidgets.QPushButton("4️⃣ Roots of Polynomial")
-        self.btn_solve = QtWidgets.QPushButton("5️⃣ Solve Ax = b")
-        self.btn_refine = QtWidgets.QPushButton("6️⃣ Smallest/Largest Roots")
-
-        for b in [
-            self.btn_coeffs, self.btn_companion, self.btn_eigs,
-            self.btn_roots, self.btn_solve, self.btn_refine
-        ]:
-            b.setStyleSheet(btn_style)
-            b.setMinimumHeight(36)
-
-        buttons_layout.addWidget(self.btn_coeffs, 0, 0)
-        buttons_layout.addWidget(self.btn_companion, 0, 1)
-        buttons_layout.addWidget(self.btn_eigs, 1, 0)
-        buttons_layout.addWidget(self.btn_roots, 1, 1)
-        buttons_layout.addWidget(self.btn_solve, 2, 0)
-        buttons_layout.addWidget(self.btn_refine, 2, 1)
-
-        layout.addLayout(buttons_layout)
-
-        # Output box
-        self.t3_output = QtWidgets.QTextEdit()
-        self.t3_output.setReadOnly(True)
-        layout.addWidget(self.t3_output)
-
-        # Data placeholders
-        self.t3_coeffs = None
-        self.t3_C = None
-        self.t3_roots = None
-
-        # Connect buttons to handlers
-        self.btn_coeffs.clicked.connect(self.on_legendre_coeffs)
-        self.btn_companion.clicked.connect(self.on_legendre_companion)
-        self.btn_eigs.clicked.connect(self.on_legendre_eigs)
-        self.btn_roots.clicked.connect(self.on_legendre_roots)
-        self.btn_solve.clicked.connect(self.on_legendre_solve)
-        self.btn_refine.clicked.connect(self.on_legendre_refine)
-
-        w.setLayout(layout)
-        return w
-    def on_legendre_coeffs(self):
-        n = self.t3_n.value()
-        self.t3_output.clear()
-        self.t3_output.append(f"1️⃣ Computing coefficients for order n={n}...")
-
-        try:
-            coeffs = shifted_legendre_poly_coeffs(n)
-            self.t3_coeffs = coeffs
-            self.t3_output.append("\nCoefficients (highest-first):")
-            if len(coeffs) > 200:
-                coeffs_disp = coeffs[:200].tolist() + ["... (truncated) ..."]
-            else:
-                coeffs_disp = coeffs.tolist()
-            self.t3_output.append(str(coeffs_disp))
-        except Exception as e:
-            self.t3_output.append(f"❌ Failed to compute coefficients: {e}")
-
-    def _on_legendre_n_changed(self):
-    # Reset cached data when user changes the polynomial order
-        self.t3_coeffs = None
-        self.t3_C = None
-        self.t3_roots = None
-        self.t3_output.append("\n⚠️ Order n changed. Previous computations cleared.")
-
-    def on_legendre_companion(self):
-        if self.t3_coeffs is None:
-            self.t3_output.append("⚠️ Compute coefficients first.")
-            return
-
-        coeffs = self.t3_coeffs
-        n = len(coeffs) - 1
-        self.t3_output.append(f"\n2️⃣ Building companion matrix for degree {n}...")
-
-        try:
-            C = companion_matrix_from_coeffs(coeffs)
-            self.t3_C = C
-            r, c = C.shape
-            if n <= 100:
-                block = C
-                label = "Full matrix shown below:"
-            else:
-                block = C[:100, :100]
-                label = f"Top-left 100×100 block shown (full matrix is {r}×{c})"
-            self.t3_output.append(label)
-            self.t3_output.append(np.array2string(block, precision=8, separator=', '))
-        except Exception as e:
-            self.t3_output.append(f"❌ Failed to build companion matrix: {e}")
-
-
-    def on_legendre_eigs(self):
-        if self.t3_C is None:
-            self.t3_output.append("⚠️ Build companion matrix first.")
-            return
-
-        self.t3_output.append("\n3️⃣ Computing eigenvalues (roots of polynomial)...")
-        try:
-            eigs = np.linalg.eigvals(self.t3_C)
-            eigs = np.sort_complex(eigs)
-            self.t3_output.append(str(eigs[:200].tolist() if len(eigs) > 200 else eigs.tolist()))
-        except Exception as e:
-            self.t3_output.append(f"❌ Eigenvalue computation failed: {e}")
-
-
-    def on_legendre_roots(self):
-        n = self.t3_n.value()
-        self.t3_output.append("\n4️⃣ Computing roots via SciPy roots_legendre...")
-        try:
-            roots_t, _ = special.roots_legendre(n)
-            roots_shifted = (roots_t + 1.0) / 2.0
-            self.t3_roots = roots_shifted
-            self.t3_output.append(str(roots_shifted[:200].tolist() if len(roots_shifted) > 200 else roots_shifted.tolist()))
-        except Exception as e:
-            self.t3_output.append(f"❌ Failed to compute roots: {e}")
-
-
-    def on_legendre_solve(self):
-        if self.t3_C is None:
-            self.t3_output.append("⚠️ Build companion matrix first.")
-            return
-
-        C = self.t3_C
-        m = C.shape[0]
-        b = np.zeros(m)
-        b[:min(100, m)] = np.arange(1, min(100, m)+1)
-        self.t3_output.append("\n5️⃣ Solving Ax=b ...")
-        try:
-            x, err = solve_lu(C, b)
-            if err:
-                raise Exception(err)
-            self.t3_output.append(str(x[:20].tolist() if len(x) > 20 else x.tolist()))
-        except Exception as e:
-            self.t3_output.append(f"❌ Ax=b failed: {e}")
-
-
-    def on_legendre_refine(self):
-        if self.t3_coeffs is None or self.t3_roots is None:
-            self.t3_output.append("⚠️ Compute coefficients and roots first.")
-            return
-
-        coeffs = self.t3_coeffs
-        roots = self.t3_roots
-        smallest = float(np.min(roots))
-        largest = float(np.max(roots))
-        self.t3_output.append("\n6️⃣ Refining smallest and largest roots via Newton–Raphson...")
-        try:
-            s_ref = newton_refine_poly_from_coeffs(coeffs, smallest)
-            l_ref = newton_refine_poly_from_coeffs(coeffs, largest)
-            self.t3_output.append(f"Smallest root refined: {s_ref:.15g}")
-            self.t3_output.append(f"Largest root refined: {l_ref:.15g}")
-        except Exception as e:
-            self.t3_output.append(f"❌ Newton refinement failed: {e}")
-
-
-
-    def on_run_legendre(self):
-        n = int(self.t3_n.value())
-        self.t3_output.clear()
-        self.t3_output.append(f"Preparing outputs for shifted Legendre polynomial of order {n} (domain [0,1]).")
-
-        # 1) coefficients of nth modified (shifted) Legendre polynomial
-        try:
-            coeffs = shifted_legendre_poly_coeffs(n)  # highest-first floats normalized
-            coeffs_list = [float(c) for c in coeffs]
-            if len(coeffs_list) > 200:
-                coeffs_display = coeffs_list[:200] + ["... (truncated) ..."]
-            else:
-                coeffs_display = coeffs_list
-            self.t3_output.append("\n1) Coefficients (highest-first) of the shifted Legendre polynomial:")
-            self.t3_output.append(str(coeffs_display))
-        except Exception as e:
-            self.t3_output.append(f"Failed to compute coefficients: {e}")
-            return
-
-        # Build companion matrix and do LU / eigen only if feasible
-        build_companion = (n <= COMPANION_LIMIT)
-
-        C = None
-        if build_companion:
-            try:
-                C = companion_matrix_from_coeffs(coeffs)
-                self.t3_output.append("\n2) Companion matrix of the polynomial:")
-                r, c = C.shape
-                self.t3_output.append(f"Companion matrix shape: {C.shape}")
-
-                # Decide how much to display
-                if n <= 100:
-                    block = C
-                    label = "Full matrix shown below:"
-                else:
-                    block = C[:100, :100]
-                    label = f"Top-left 100×100 block shown (full matrix is {r}×{c}):"
-
-                # Convert the chosen block to string for QTextEdit
-                block_str = np.array2string(
-                    block,
-                    precision=8,
-                    suppress_small=False,
-                    max_line_width=10_000,
-                    separator=', '
-                )
-                self.t3_output.append(label + "\n" + block_str)
-
-                # Always save the complete matrix to files
-                np.save(f"companion_matrix_n{n}.npy", C)
-                np.savetxt(f"companion_matrix_n{n}.csv", C, delimiter=",", fmt="%.16g")
-                self.t3_output.append(
-                    f"\nSaved full matrix to files:\n"
-                    f"  companion_matrix_n{n}.npy\n"
-                    f"  companion_matrix_n{n}.csv"
-                )
-
-            except Exception as e:
-                self.t3_output.append(f"Failed to build companion matrix: {e}")
-                C = None
-
-        # 3) LU decomposition of companion matrix and eigenvalues
-        if C is not None and C.size > 0:
-            try:
-                lu, piv = linalg.lu_factor(C)
-                self.t3_output.append("\n3) LU decomposition of companion matrix (compact representation):")
-                self.t3_output.append(f"LU shape: {lu.shape}; piv length: {len(piv)}")
-                if lu.shape[0] <= 12:
-                    self.t3_output.append(str(lu))
-                else:
-                    lu_snip = np.array2string(lu[:6, :6], precision=6, separator=', ')
-                    self.t3_output.append("Showing top-left 6x6 block of LU:\n" + lu_snip)
-            except Exception as e:
-                self.t3_output.append(f"LU decomposition failed: {e}")
-
-            try:
-                eigs = np.linalg.eigvals(C)
-                eigs_sorted = np.sort_complex(eigs)
-                eigs_list = [complex(ev) for ev in eigs_sorted]
-                display_eigs = eigs_list if len(eigs_list) <= 200 else eigs_list[:200] + ["... (truncated) ..."]
-                self.t3_output.append("\nEigenvalues of companion matrix (these are the polynomial roots):")
-                self.t3_output.append(str(display_eigs))
-            except Exception as e:
-                self.t3_output.append(f"Eigenvalue computation failed: {e}")
-        else:
-            self.t3_output.append("\n3) LU/eigen steps skipped because companion matrix is unavailable.")
-
-        # 4) roots of polynomial using roots_legendre (robust) and shift
-        try:
-            roots_t, _ = special.roots_legendre(n)
-            roots_shifted = (roots_t + 1.0) / 2.0
-            roots_list = [float(r) for r in roots_shifted]
-            display_roots = roots_list if len(roots_list) <= 200 else roots_list[:200] + ["... (truncated) ..."]
-            self.t3_output.append("\n4) Roots of the shifted Legendre polynomial (in [0,1]):")
-            self.t3_output.append(str(display_roots))
-        except Exception as e:
-            self.t3_output.append(f"Failed to compute roots via roots_legendre: {e}")
-            roots_list = []
-
-        # 5) Determine solution of Ax=b where b={1,2,...,100} adapted to A size using LU
-        if C is not None and C.size > 0:
-            m = C.shape[0]
-            k = min(100, m)
-            b = np.zeros(m, dtype=np.float64)
-            b[:k] = np.arange(1, k+1, dtype=np.float64)
-            x, err = None, None
-            try:
-                x, err = solve_lu(C, b)
-            except Exception as e:
-                err = str(e)
-            if err:
-                self.t3_output.append(f"\n5) Solving Ax=b failed: {err}")
-            else:
-                self.t3_output.append("\n5) Solution of Ax=b (showing first 20 entries or all if shorter):")
-                to_show = x if len(x) <= 20 else x[:20]
-                self.t3_output.append(str([float(v) for v in to_show]))
-        else:
-            self.t3_output.append("\n5) Ax=b solve skipped because companion matrix is unavailable.")
-
-        # 6) smallest & largest roots refined by Newton-Raphson
-        if len(roots_list) > 0:
-            smallest = float(np.min(roots_list))
-            largest = float(np.max(roots_list))
-            try:
-                s_ref = newton_refine_poly_from_coeffs(coeffs, smallest)
-                l_ref = newton_refine_poly_from_coeffs(coeffs, largest)
-                self.t3_output.append(f"\n6) Smallest root refined: {s_ref:.15g}")
-                self.t3_output.append(f"Largest root refined: {l_ref:.15g}")
-            except Exception as e:
-                self.t3_output.append(f"Newton refinement failed: {e}")
-        else:
-            self.t3_output.append("\n6) No roots available to refine.")
-
-        self.t3_output.append('\nDone.')
-
-
-# LU solver helper used above
-
-def solve_lu(A: np.ndarray, b: np.ndarray):
-    try:
-        lu, piv = linalg.lu_factor(A)
-        x = linalg.lu_solve((lu, piv), b)
-        return x, None
-    except Exception as e:
-        return None, str(e)
-
-# -------------------- Run --------------------
+        
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+    app = QApplication(sys.argv)
+    win = AssignmentMain()
+    win.show()
     sys.exit(app.exec_())
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
